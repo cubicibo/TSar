@@ -33,8 +33,13 @@ class PESPacket:
             assert len(self.data) >= self.size()
             self.data = self.data[:self.size()]
 
+    def __len__(self) -> int:
+        return len(self.data)
+
     def size(self) -> int:
-        return self.pes_packet_length + 6
+        if self.stream_id & 0xF0 != 0xE0:
+            return self.pes_packet_length + 6
+        return len(self.data)
 
     @property
     def packet_start_code_prefix(self) -> int:

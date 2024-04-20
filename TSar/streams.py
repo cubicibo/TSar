@@ -81,35 +81,51 @@ class AbstractTransportStream:
 
 ####
 
-# class ArbitraryTransportStream(AbstractTransportStream):
-#     def __init__(self, fpath: Path) -> None:
-#         super().__init__(fpath)
-#         self.identify()
+class ArbitraryTransportStream(AbstractTransportStream):
+    def __init__(self, fpath: Path) -> None:
+        super().__init__(fpath)
+        self._pck_cls = None
 
-#     @property
-#     def packet_class(self) -> Type[TSPacket]:
-#         return TSPacket
+        try:    pck_overhead = self.identify()
+        except: ...
+        else:
+            if pck_overhead == 4:
+                self._pck_cls = M2TSPacket
+            elif pck_overhead == 0:
+                self._pck_cls = TSPacket
 
-#     def identify(self) -> tuple[Type[TSPacket], int]:
-#         assert self._fp.exists()
-#         with open(self._fp, 'rb') as f:
-#             buffer = f.read(16384)
-#         pck_overhead = buffer.find(b'G')
-#         assert pck_overhead >= 0, "Cannot find any sync byte in first kilobytes!"
+    def set_packet_class(self, pck_class: Type[TSPacket]) -> None:
+        assert pck_class.size >= 188
+        self._pck_cls = pck_class
 
-#         trials = 0
-#         while (trials := trials + 1) < 5:
-#             size_pck = 188 + pck_overhead
-#             cnt = hit = 0
-#             while (cnt := cnt + 1) < 4:
-#                 hit += ord(b'G') == buffer[pck_overhead + cnt*size_pck]
-#             #aligned on sync bytes?
-#             if hit == cnt - 1:
-#                 break
-#             else:
-#                 pck_overhead = 1 + pck_overhead + buffer[pck_overhead+1:].find(b'G')
-#         assert trials < 5
-#         return pck_overhead
+    @property
+    def packet_class(self) -> Type[TSPacket]:
+        return self._pck_cls
+
+    def gen_packets(self) -> Generator[TSPacket, None, None]:
+        assert self._pck_cls is not None
+        yield from super().gen_packets()
+
+    def identify(self) -> tuple[Type[TSPacket], int]:
+        assert self._fp.exists()
+        with open(self._fp, 'rb') as f:
+            buffer = f.read(16384)
+        pck_overhead = buffer.find(b'G')
+        assert pck_overhead >= 0, "Cannot find any sync byte in first kilobytes!"
+
+        trials = 0
+        while (trials := trials + 1) < 5:
+            size_pck = 188 + pck_overhead
+            cnt = hit = 0
+            while (cnt := cnt + 1) < 4:
+                hit += ord(b'G') == buffer[pck_overhead + cnt*size_pck]
+            #aligned on sync bytes?
+            if hit == cnt - 1:
+                break
+            else:
+                pck_overhead = 1 + pck_overhead + buffer[pck_overhead+1:].find(b'G')
+        assert trials < 5
+        return pck_overhead
 
 class TransportStream(AbstractTransportStream):
     @property
