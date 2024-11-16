@@ -162,7 +162,7 @@ class TSPacket:
         assert self.sync_byte == ord(b'G')
 
     def __bytes__(self) -> bytes:
-        return self.data
+        return bytes(self.data)
 
     def __str__(self) -> str:
         return f"{self.PID:04X} {self.continuity_counter:1X}: PUSI={self.payload_unit_start_indicator:1} AFC={self.adaptation_field_control:1}"
@@ -236,6 +236,9 @@ class M2TSPacket(TSPacket):
 
     def to_tspacket(self) -> TSPacket:
         return TSPacket(self.data)
+
+    def __bytes__(self) -> bytes:
+        return bytes(self.tp_extra_header + self.data)
 
     @property
     def arrival_time_stamp(self) -> int:

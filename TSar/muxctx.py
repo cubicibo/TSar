@@ -34,14 +34,14 @@ class PacketAttribute:
     pck_size: int
     pts: int
     dts: Optional[int] = None
-    
+
     @classmethod
     def from_pa(cls, bstr: bytes) -> 'PacketAttribute':
         assert bstr[0] == 80 and len(bstr) >= 15
         tp_cnt, pck_size = struct.unpack(">HI", bstr[1:7])
         dts, pts = cls._decode_timestamps(bstr[6:15])
         return cls(tp_cnt, pck_size >> 8, pts, dts)
-        
+
     @staticmethod
     def _decode_timestamps(tc_string) -> tuple[int, int]:
         dts = (struct.unpack(">I", tc_string[:4])[0]) << 1
@@ -59,22 +59,22 @@ class PAF:
         self._fp = Path(fp)
         assert self._fp.exists()
         self._pid = None
-    
+
     @property
     def pid(self) -> int:
         return self._pid
-    
+
     def gen_packet_attribute(self) -> Generator[PacketAttribute, None, None]:
         """
         Yields packet attributes from the PA collection in the file.
         """
         with open(self._fp, 'rb') as f:
             buffer = f.read(0x7FFF)
-            
+
             self._pid, header = __class__._read_header(buffer)
             assert 0 < self._pid < 0x1FFF, "Bad file header."
             buffer = buffer[2+1+len(header):]
-            
+
             while buffer:
                 yield PacketAttribute.from_pa(buffer[:15])
                 buffer = buffer[15:]
@@ -82,15 +82,15 @@ class PAF:
                     buffer += f.read(0x7FFF)
                     assert len(buffer) >= 15 or len(buffer) == 0
         ####
-    
+
     @staticmethod
     def _read_header(buffer: bytes) -> tuple[int, bytes]:
         assert len(buffer) > 2 and len(buffer) > buffer[2]
         pid = struct.unpack(">H", buffer[:2])[0]
         header = buffer[3:3+buffer[2]]
         return pid, header
-        
-        
+
+
     def __iter__(self):
         self._gp = self.gen_packets()
         return self
@@ -103,26 +103,27 @@ class PAF:
 class Demux:
     def __init__(self, ts: TransportStream, excluded_pids: Optional[list[int]] = None) -> None:
         self.ts = ts
-        self.excluded_pids = excluded_pids
+
+        # PMT, SIT, PMP, PCR
+        self.system_pids = [0x0000, 0x001F, 0x0100]
+        self.excluded_pids = self.system_pids.copy() + [0x1001, 0x1FFF] #PCR, null packet
+        if excluded_pids:
+            self.excluded_pids += excluded_pids
 
     def index_streams(self, folder, pbar: ContextManager = nullcontext()) -> None:
         pafg = PAFGenerator(folder)
 
-        # PMT, SIT, PMP, PCR, null packet
-        excluded_pids = [0x0000, 0x001F, 0x0100, 0x1001, 0x1FFF]
-        if self.excluded_pids:
-            excluded_pids += self.excluded_pids
         pck_buffer = dict()
-        
+
         if getattr(pbar, 'update', None) is None:
             pbar.update = lambda *args, **kwargs: None
         with pbar:
             for tp in self.ts:
-                if tp.PID in excluded_pids:
+                if tp.PID in self.excluded_pids:
                     continue
                 assert tp.adaptation_field_control & AdaptationFieldControl.PAYLOAD
                 pesp, cnt = __class__._proc_transport_packet(tp, pck_buffer)
-    
+
                 if cnt > 0:
                     pafg.add_packet(tp.PID, pesp, cnt)
                 pbar.update()
@@ -130,6 +131,31 @@ class Demux:
             pesp = PESPacket(b''.join(map(lambda pib: pib.payload, lpck)))
             pafg.add_packet(pid, pesp, len(lpck))
     ####
+
+    def get_psi(self, psi_pids: Optional[list[int]] = None) -> dict[int, list[TSPacket]]:
+        if psi_pids is not None:
+            selected_pids = psi_pids
+        else:
+            selected_pids = self.system_pids
+        sys_pkt = {pid: [] for pid in selected_pids}
+        pid_done = set()
+        for tp in filter(lambda tp: tp.PID in selected_pids, self.ts):
+            # we don't parse the PCR which is the only packet that only contains adaptation
+            assert tp.adaptation_field_control & AdaptationFieldControl.PAYLOAD
+            match tp.PID:
+                case 0x0000:
+                    if 0 == len(sys_pkt[tp.PID]):
+                        assert tp.payload_unit_start_indicator
+                        sys_pkt[tp.PID].append(tp)
+                        pid_done.add(tp.PID)
+                case _:
+                    if 0 == len(sys_pkt.get(tp.PID, None)) or not tp.payload_unit_start_indicator:
+                        sys_pkt[tp.PID].append(tp)
+                    else:
+                        pid_done.add(tp.PID)
+            if pid_done.issuperset(selected_pids):
+                break
+        return sys_pkt
 
     @staticmethod
     def _proc_transport_packet(tp: TSPacket, buffer: dict[int, list[TSPacket]]) -> Optional[tuple[PESPacket, int]]:
@@ -165,7 +191,7 @@ class PAFGenerator:
 
     def append_index_file(self, pid: int, packet: PESPacket, cnt: int) -> None:
         assert packet.pts is not None
-        
+
         if packet.dts is None:
             dts = packet.pts
         else:
@@ -188,12 +214,22 @@ class PAFGenerator:
         payload[4] |= ((dts & 0x1) << 7)
         return payload
 ####
+#%%
+
+from streams import TransportStream, ArbitraryTransportStream
+
+def remux(ts: TransportStream, std_model):
+    dmx = Demux(ts)
+    psi_packets = dmx.get_psi()
+    dmx.index_streams(ts.path.parent)
+
+    std = std_model
 
 #%%
 # class Mux:
 #     def __init__(self, index_folder: Path, input_ts: Path) -> None:
 #         self._index_fp = Path(index_folder)
 #         assert self._if.exists()
-        
+
 #         self._input_ts = Path(input_ts)
 #         assert self._input_ts.exists()

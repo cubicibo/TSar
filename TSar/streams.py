@@ -18,7 +18,9 @@ You should have received a copy of the GNU General Public License
 along with TSar.  If not, see <http://www.gnu.org/licenses/>.
 """
 
-from abc import abstractproperty
+import re
+import numpy as np
+
 from typing import Generator, Type, Optional, Callable
 from pathlib import Path
 
@@ -26,20 +28,43 @@ from tspacket import TSPacket, M2TSPacket
 from pespacket import PESPacket
 
 #%%
-class AbstractTransportStream:
+class ArbitraryPacket:
+    def __init__(self, header: int, footer: int) -> None:
+        self.header = header
+        self.footer = footer
+    @property
+    def size(self) -> int:
+        return 188 + self.header + self.footer
+    def identify(self) -> [int, int]:
+        return self.header, self.footer
+    @property
+    def packet_class(self) -> Type[TSPacket]:
+        return lambda b: TSPacket(b[self.header:self.header+188])
+
+class ArbitraryTransportStream:
     def __init__(self, fpath: Path) -> None:
         self._fp = Path(fpath)
+        self._fs_offset = 0
+        self._pck_cls = None
 
-    @abstractproperty
-    def packet_class(self) -> Type[TSPacket]:
-        raise NotImplementedError
+        try:
+            header, footer = self.identify()
+        except:
+            header = footer = None
+        else:
+            if header == 4 and 0 == footer:
+                self.set_packet_class(M2TSPacket)
+            elif header == 0 == footer:
+                self.set_packet_class(TSPacket)
+            else:
+                self.set_packet_class(ArbitraryPacket(header, footer))
 
     def gen_packets(self) -> Generator[TSPacket, None, None]:
         file_hdl = open(self._fp, 'rb')
+        file_hdl.seek(self._fs_offset)
+
         buffer = bytearray(file_hdl.read(0xFFFF))
-
         size_pck = self.packet_class.size
-
         while buffer:
             assert len(buffer) >= size_pck
             yield self.packet_class(buffer[:size_pck])
@@ -79,21 +104,6 @@ class AbstractTransportStream:
     def __next__(self):
         return next(self._gp)
 
-####
-
-class ArbitraryTransportStream(AbstractTransportStream):
-    def __init__(self, fpath: Path) -> None:
-        super().__init__(fpath)
-        self._pck_cls = None
-
-        try:    pck_overhead = self.identify()
-        except: ...
-        else:
-            if pck_overhead == 4:
-                self._pck_cls = M2TSPacket
-            elif pck_overhead == 0:
-                self._pck_cls = TSPacket
-
     def set_packet_class(self, pck_class: Type[TSPacket]) -> None:
         assert pck_class.size >= 188
         self._pck_cls = pck_class
@@ -102,39 +112,54 @@ class ArbitraryTransportStream(AbstractTransportStream):
     def packet_class(self) -> Type[TSPacket]:
         return self._pck_cls
 
-    def gen_packets(self) -> Generator[TSPacket, None, None]:
-        assert self._pck_cls is not None
-        yield from super().gen_packets()
-
-    def identify(self) -> tuple[Type[TSPacket], int]:
+    def identify(self) -> int:
         assert self._fp.exists()
         with open(self._fp, 'rb') as f:
             buffer = f.read(16384)
-        pck_overhead = buffer.find(b'G')
-        assert pck_overhead >= 0, "Cannot find any sync byte in first kilobytes!"
 
-        trials = 0
-        while (trials := trials + 1) < 5:
-            size_pck = 188 + pck_overhead
-            cnt = hit = 0
-            while (cnt := cnt + 1) < 4:
-                hit += ord(b'G') == buffer[pck_overhead + cnt*size_pck]
-            #aligned on sync bytes?
-            if hit == cnt - 1:
-                break
-            else:
-                pck_overhead = 1 + pck_overhead + buffer[pck_overhead+1:].find(b'G')
-        assert trials < 5
-        return pck_overhead
+        possible_syncs = [m.start() for m in re.finditer(b'G', buffer)]
+        assert len(possible_syncs), "no sync"
+        syncs = np.asarray(possible_syncs)
+        pck_size = int(np.median(np.abs(np.diff(syncs[:, None] - syncs))))
 
-class TransportStream(AbstractTransportStream):
+        footer = header = 0
+        match pck_size:
+            case 192:
+                header = 4
+            case 204:
+                footer = 16
+
+        syncs = set(possible_syncs)
+        max_sync = possible_syncs[-1]//pck_size
+        sync = next(filter(lambda s: syncs.issuperset(range(s, max_sync, pck_size)), possible_syncs))
+
+        assert (file_offset := sync - header) >= 0
+        self._fs_offset = file_offset
+        return header, footer
+
+    @property
+    def path(self) -> Path:
+        return Path(self._fp)
+
+class TransportStream(ArbitraryTransportStream):
+    def identify(self) -> int:
+        ts_type = super().identify()
+        if ts_type == (0, 0):
+            return (0, 0)
+        raise TypeError(f"TS packet properties mismatch: (header, footer)={ts_type}.")
+
     @property
     def packet_class(self) -> Type[TSPacket]:
         return TSPacket
     ####
 ####
 
-class M2TransportStream(AbstractTransportStream):
+class M2TransportStream(ArbitraryTransportStream):
+    def identify(self) -> int:
+        ts_type = super().identify()
+        if (4, 0) == ts_type:
+            return ts_type
+        raise TypeError(f"TS packet properties mismatch: (header, footer)={ts_type}.")
     @property
     def packet_class(self) -> Type[M2TSPacket]:
         return M2TSPacket
